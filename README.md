@@ -1,6 +1,6 @@
 # Purpose of This Repo
 
-This repo is the source of truth for all exercises in this course.
+This repo is the source of truth for all exercises in this course.  (test commit)
 
 > IMPORTANT!  Please remove these instructions before sharing this repo with learners.
 
