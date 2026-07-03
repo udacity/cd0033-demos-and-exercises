@@ -1,0 +1,16 @@
+# nd038 Course 4 — demos & exercises container
+# Tested on CPython 3.12.3. Requires Python >= 3.11 (pandas 3.x floor).
+# SQLite-backed for most modules; MP2/MP7/MP9 exercises+demos use real AWS (boto3/awswrangler).
+
+# Notebook runtime (so the container can open and execute .ipynb)
+jupyterlab==4.*
+notebook==7.*
+ipykernel==7.3.0
+
+# Exercise/demo runtime dependencies (all modules)
+pandas==3.0.1
+jsonschema==4.26.0   # data-contract validation (MP3) + contract-bearing modules
+
+# AWS modules only (MP2 Glue, MP7 Lake Formation + Athena, MP9 governance audit)
+boto3==1.36.0
+awswrangler>=3.9,<4
