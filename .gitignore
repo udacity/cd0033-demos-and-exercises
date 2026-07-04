@@ -1,3 +1,6 @@
 .DS_Store
 .vscode
 
+# Per-module distribution archives (built locally, not versioned)
+MP*.zip
+
