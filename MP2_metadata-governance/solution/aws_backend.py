@@ -189,7 +189,10 @@ class AwsGovernedCatalog(GovernedCatalog):  # pragma: no cover - live AWS only
         super().assign_tag(table, key, value)  # mirror (catalog.lf_tags)
         try:
             self.lf.create_lf_tag(TagKey=key, TagValues=[value])
-        except self.lf.exceptions.AlreadyExistsException:
+        except (self.lf.exceptions.AlreadyExistsException,
+                self.lf.exceptions.InvalidInputException):
+            # LF throws InvalidInputException("Tag key already exists") rather than
+            # AlreadyExistsException — handle both for safety.
             pass
         self.lf.add_lf_tags_to_resource(
             Resource=self._table_resource(table),
@@ -274,7 +277,8 @@ class AwsGovernedCatalog(GovernedCatalog):  # pragma: no cover - live AWS only
         try:
             return wr.athena.read_sql_query(
                 sql, database=self.database, workgroup=self.athena_workgroup,
-                s3_output=self.results_bucket, boto3_session=sess)
+                s3_output=self.results_bucket, boto3_session=sess,
+                ctas_approach=False)
         except Exception as e:
             # Lake Formation / Athena denials surface as a query error -> AccessDenied,
             # so verify_step7's auditor SELECT-denied check works against real enforcement.

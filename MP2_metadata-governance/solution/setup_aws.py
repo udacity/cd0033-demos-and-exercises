@@ -49,7 +49,20 @@ def main() -> None:
     database = _cfg("CARDINAL_GLUE_DATABASE", catalog.database)
     s3_data = _cfg("CARDINAL_S3_DATA", f"s3://{account_id}-{database}-data").rstrip("/")
 
-    # 1. database
+    # 1a. S3 bucket (create if it doesn't exist)
+    s3 = session.client("s3")
+    bucket_name = s3_data.split("://", 1)[1].split("/")[0]
+    try:
+        s3.head_bucket(Bucket=bucket_name)
+        print(f"S3 bucket {bucket_name!r} already exists")
+    except s3.exceptions.ClientError:
+        create_kw = {"Bucket": bucket_name}
+        if region != "us-east-1":
+            create_kw["CreateBucketConfiguration"] = {"LocationConstraint": region}
+        s3.create_bucket(**create_kw)
+        print(f"created S3 bucket {bucket_name!r} in {region}")
+
+    # 1b. database
     try:
         glue.create_database(DatabaseInput={"Name": database,
                                             "Description": "Cardinal Outfitters governed platform"})
