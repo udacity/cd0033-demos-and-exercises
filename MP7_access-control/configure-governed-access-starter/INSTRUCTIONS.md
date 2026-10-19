@@ -40,3 +40,18 @@ pip install pandas jsonschema boto3 awswrangler jupyterlab
 export CARDINAL_LF_LIVE=1        # in the lab; uses live Lake Formation + Athena (else local fallback)
 jupyter lab exercise.ipynb
 ```
+
+## Section 5: Infrastructure as Code (Terraform Reading)
+
+After completing the hands-on grants, open `terraform/governed-data-product/main.tf`. This
+is a **read-only** Terraform module that packages a governed data product declaratively.
+
+Answer the 4 questions in the notebook:
+1. Identify the governance chain (S3 → Glue → Lake Formation → IAM)
+2. Explain why the consumer has no direct S3 data access
+3. Connect the Terraform `excluded_column_names` to your hands-on column grant
+4. Compose a module call for a new data product with PII
+
+**Key insight**: The Terraform module does exactly what you did by hand — but repeatably,
+version-controlled, and auditable. The capstone project will ask you to read and explain
+an identical module.

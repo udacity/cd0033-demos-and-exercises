@@ -4,3 +4,6 @@
 # Per-module distribution archives (built locally, not versioned)
 MP*.zip
 
+# Python bytecode cache
+__pycache__/
+*.py[cod]
