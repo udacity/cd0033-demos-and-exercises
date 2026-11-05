@@ -1,0 +1,125 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Veridian Health Medallion Lakehouse - Instructor Demo Environment (Optional CloudFormation).
+  Note: Running `python3 setup_aws.py` (or the Step 0 cell in any demo notebook) automatically
+  provisions all of these resources if they do not exist yet.
+
+Parameters:
+  AdminPrincipalArn:
+    Type: String
+    Description: IAM Role or User ARN to register as Lake Formation Data Lake Administrator
+
+Resources:
+
+  LakehouseBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub '${AWS::AccountId}-veridian-lakehouse'
+
+  AthenaResultsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub '${AWS::AccountId}-veridian-athena-results'
+
+  AthenaWorkgroup:
+    Type: AWS::Athena::WorkGroup
+    Properties:
+      Name: veridian
+      Description: Veridian Health Medallion Lakehouse demo workgroup
+      State: ENABLED
+      WorkGroupConfiguration:
+        ResultConfiguration:
+          OutputLocation: !Sub 's3://${AthenaResultsBucket}/'
+
+  LakeFormationSettings:
+    Type: AWS::LakeFormation::DataLakeSettings
+    Properties:
+      Admins:
+        - DataLakePrincipalIdentifier: !Ref AdminPrincipalArn
+      CreateDatabaseDefaultPermissions: []
+      CreateTableDefaultPermissions: []
+
+  VeridianPersonaManagedPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: VeridianPersonaRolePolicy
+      Description: Uniform policy for Veridian Health persona roles (Athena + Glue read + LF data access)
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AthenaQueryAccess
+            Effect: Allow
+            Action:
+              - athena:StartQueryExecution
+              - athena:GetQueryResults
+              - athena:GetQueryExecution
+              - athena:GetWorkGroup
+            Resource: '*'
+          - Sid: GlueCatalogReadAccess
+            Effect: Allow
+            Action:
+              - glue:Get*
+            Resource: '*'
+          - Sid: LakeFormationDataAccess
+            Effect: Allow
+            Action:
+              - lakeformation:GetDataAccess
+            Resource: '*'
+          - Sid: AthenaResultsBucketAccess
+            Effect: Allow
+            Action:
+              - s3:GetObject
+              - s3:PutObject
+              - s3:GetBucketLocation
+              - s3:ListBucket
+            Resource:
+              - !GetAtt AthenaResultsBucket.Arn
+              - !Sub '${AthenaResultsBucket.Arn}/*'
+
+  VhClinicalResearcherRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: vh_clinical_researcher
+      ManagedPolicyArns: [!Ref VeridianPersonaManagedPolicy]
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { AWS: !Sub 'arn:aws:iam::${AWS::AccountId}:root' }
+            Action: sts:AssumeRole
+
+  VhEuCareCoordinatorRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: vh_eu_care_coordinator
+      ManagedPolicyArns: [!Ref VeridianPersonaManagedPolicy]
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { AWS: !Sub 'arn:aws:iam::${AWS::AccountId}:root' }
+            Action: sts:AssumeRole
+
+  VhHimStewardRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: vh_him_steward
+      ManagedPolicyArns: [!Ref VeridianPersonaManagedPolicy]
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { AWS: !Sub 'arn:aws:iam::${AWS::AccountId}:root' }
+            Action: sts:AssumeRole
+
+  VhHipaaComplianceAuditorRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: vh_hipaa_compliance_auditor
+      ManagedPolicyArns: [!Ref VeridianPersonaManagedPolicy]
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { AWS: !Sub 'arn:aws:iam::${AWS::AccountId}:root' }
+            Action: sts:AssumeRole

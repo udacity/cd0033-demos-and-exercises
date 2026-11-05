@@ -29,7 +29,7 @@ def _detect_workgroup_and_results(athena, s3, account_id: str, database: str) ->
     explicit_wg = os.environ.get("VERIDIAN_ATHENA_WORKGROUP") or os.environ.get("CARDINAL_ATHENA_WORKGROUP")
     explicit_res = os.environ.get("VERIDIAN_S3_RESULTS") or os.environ.get("CARDINAL_S3_RESULTS")
 
-    candidates = ([explicit_wg] if explicit_wg else []) + [database, "veridian", "cardinal", "trailhead", "primary"]
+    candidates = ([explicit_wg] if explicit_wg else []) + ["veridian", database, "cardinal", "trailhead", "primary"]
     chosen_wg = "primary"
     chosen_res = explicit_res or ""
 
@@ -117,7 +117,21 @@ class AwsMedallionLakehouse(MedallionLakehouse):  # pragma: no cover - live AWS
                 break
         return tables
 
+    def _list_all_lf_permissions(self) -> list[dict]:
+        out, token = [], None
+        while True:
+            kw = {"CatalogId": self.account_id}
+            if token:
+                kw["NextToken"] = token
+            resp = self.lf.list_permissions(**kw)
+            out.extend(resp.get("PrincipalResourcePermissions", []))
+            token = resp.get("NextToken")
+            if not token:
+                break
+        return out
+
     def _sync_from_aws(self) -> None:
+        # 1. Sync table and column governance parameters from Glue
         try:
             for tbl in self._glue_tables():
                 name = tbl["Name"]
@@ -135,6 +149,7 @@ class AwsMedallionLakehouse(MedallionLakehouse):  # pragma: no cover - live AWS
         except Exception:
             pass
 
+        # 2. Sync LF-Tags on tables from Lake Formation
         for name, tm in self.catalog.tables.items():
             try:
                 resp = self.lf.get_resource_lf_tags(
@@ -150,6 +165,85 @@ class AwsMedallionLakehouse(MedallionLakehouse):  # pragma: no cover - live AWS
                 tm.lf_tags = tags
             except Exception:
                 pass
+
+        # 3. Sync DataCellsFilters from Lake Formation
+        for name in self.catalog.tables:
+            try:
+                resp = self.lf.list_data_cells_filter(
+                    Table={"CatalogId": self.account_id, "DatabaseName": self.database, "Name": name}
+                )
+                for dcf in resp.get("DataCellsFilters", []):
+                    expr = dcf.get("RowFilter", {}).get("FilterExpression")
+                    if dcf.get("Name") and expr:
+                        self._row_filters[dcf["Name"]] = {"table": name, "expr": expr}
+            except Exception:
+                pass
+
+        # 4. Sync persona permissions from Lake Formation
+        self._grants = {r: RoleGrants() for r in HEALTHCARE_PERSONAS}
+        arn_to_role = {arn: role for role, arn in self.personas.items()}
+        try:
+            entries = self._list_all_lf_permissions()
+            describe_tables: dict[str, set[str]] = {r: set() for r in HEALTHCARE_PERSONAS}
+            select_roles: set[str] = set()
+            for entry in entries:
+                principal_arn = entry.get("Principal", {}).get("DataLakePrincipalIdentifier", "")
+                role = arn_to_role.get(principal_arn)
+                if not role:
+                    continue
+                perms = set(entry.get("Permissions", []))
+                res = entry.get("Resource", {})
+                g = self._grants[role]
+
+                if "LFTagPolicy" in res and "SELECT" in perms:
+                    select_roles.add(role)
+                    for expr in res["LFTagPolicy"].get("Expression", []):
+                        k = expr.get("TagKey")
+                        for v in expr.get("TagValues", []):
+                            if k and v:
+                                g.tag_grants.add((k, v))
+
+                elif "DataCellsFilter" in res and "SELECT" in perms:
+                    select_roles.add(role)
+                    dcf = res["DataCellsFilter"]
+                    tname = dcf.get("TableName")
+                    fname = dcf.get("Name")
+                    if tname in self.catalog.tables:
+                        tg = g.table_grants.setdefault(tname, TableGrant())
+                        rf = self._row_filters.get(fname, {})
+                        tg.row_filter = rf.get("expr", f"filter:{fname}")
+                        if tg.columns is None:
+                            tg.columns = self._cols(tname)
+
+                elif "TableWithColumns" in res and "SELECT" in perms:
+                    select_roles.add(role)
+                    twc = res["TableWithColumns"]
+                    tname = twc.get("Name")
+                    if tname in self.catalog.tables:
+                        tg = g.table_grants.setdefault(tname, TableGrant())
+                        cols = twc.get("ColumnNames")
+                        if cols:
+                            existing = set(tg.columns or [])
+                            tg.columns = [c for c in self._cols(tname) if c in (existing | set(cols))]
+                        elif twc.get("ColumnWildcard") is not None:
+                            excluded = set(twc["ColumnWildcard"].get("ExcludedColumnNames", []))
+                            tg.columns = [c for c in self._cols(tname) if c not in excluded]
+
+                elif "Table" in res:
+                    tname = res["Table"].get("Name")
+                    if "SELECT" in perms and tname in self.catalog.tables:
+                        select_roles.add(role)
+                        tg = g.table_grants.setdefault(tname, TableGrant())
+                        tg.columns = self._cols(tname)
+                        tg.row_filter = None
+                    elif "DESCRIBE" in perms and "SELECT" not in perms and tname:
+                        describe_tables[role].add(tname)
+
+            for role, dtables in describe_tables.items():
+                if dtables and role not in select_roles:
+                    self._grants[role].describe_only = True
+        except Exception:
+            pass
 
     def query(self, sql: str) -> pd.DataFrame:
         import awswrangler as wr
@@ -249,7 +343,14 @@ class AwsMedallionLakehouse(MedallionLakehouse):  # pragma: no cover - live AWS
                 "RowFilter": {"FilterExpression": expr}, "ColumnNames": all_cols,
             })
         except Exception:
-            pass
+            try:
+                self.lf.update_data_cells_filter(TableData={
+                    "TableCatalogId": self.account_id, "DatabaseName": self.database,
+                    "TableName": table, "Name": name,
+                    "RowFilter": {"FilterExpression": expr}, "ColumnNames": all_cols,
+                })
+            except Exception:
+                pass
 
     def grant_filtered_rows(self, role, table, filter_name) -> None:
         super().grant_filtered_rows(role, table, filter_name)
@@ -281,7 +382,10 @@ class AwsMedallionLakehouse(MedallionLakehouse):  # pragma: no cover - live AWS
         try:
             self.lf.create_lf_tag(TagKey=key, TagValues=[value])
         except Exception:
-            pass
+            try:
+                self.lf.update_lf_tag(TagKey=key, TagValuesToAdd=[value])
+            except Exception:
+                pass
         self.lf.grant_permissions(
             Principal=self._principal(role),
             Resource={"LFTagPolicy": {
@@ -300,6 +404,66 @@ class AwsMedallionLakehouse(MedallionLakehouse):  # pragma: no cover - live AWS
                 Permissions=["DESCRIBE"],
             )
 
+    def reset_grants(self) -> None:
+        """Revoke all Lake Formation permissions, DataCellsFilters, and LF-Tags for Veridian personas."""
+        target_arns = set(self.personas.values())
+        try:
+            for entry in self._list_all_lf_permissions():
+                principal = entry.get("Principal", {})
+                if principal.get("DataLakePrincipalIdentifier") not in target_arns:
+                    continue
+                res = entry.get("Resource", {})
+                perms = entry.get("Permissions", [])
+                if res and perms:
+                    try:
+                        self.lf.revoke_permissions(Principal=principal, Resource=res, Permissions=perms)
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
+        for t in self.catalog.tables:
+            try:
+                resp = self.lf.list_data_cells_filter(
+                    Table={"CatalogId": self.account_id, "DatabaseName": self.database, "Name": t}
+                )
+                for dcf in resp.get("DataCellsFilters", []):
+                    try:
+                        self.lf.delete_data_cells_filter(
+                            TableCatalogId=self.account_id, DatabaseName=self.database,
+                            TableName=t, Name=dcf["Name"],
+                        )
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+            try:
+                resp = self.lf.get_resource_lf_tags(
+                    CatalogId=self.account_id,
+                    Resource=self._table_resource(t),
+                    ShowAssignedLFTags=True,
+                )
+                tags = resp.get("LFTagsOnTable", [])
+                if tags:
+                    self.lf.remove_lf_tags_from_resource(
+                        Resource=self._table_resource(t),
+                        LFTags=[{"CatalogId": self.account_id, "TagKey": tg["TagKey"], "TagValues": tg["TagValues"]}
+                                for tg in tags],
+                    )
+            except Exception:
+                pass
+
+        super().reset_grants()
+
+    def grants_summary(self) -> pd.DataFrame:
+        self._sync_from_aws()
+        return super().grants_summary()
+
+    def medallion_governance_audit(self, contracts_valid: bool = True) -> pd.DataFrame:
+        self._sync_from_aws()
+        return super().medallion_governance_audit(contracts_valid=contracts_valid)
+
     def _query_as_live(self, role: str, sql: str) -> pd.DataFrame:
         import awswrangler as wr
         import boto3
@@ -316,6 +480,10 @@ class AwsMedallionLakehouse(MedallionLakehouse):  # pragma: no cover - live AWS
             table = _table_in_from(sql)
             if table is None:
                 raise AccessDenied("metadata query did not name a table")
+            self._sync_from_aws()
+            g = self._grants[role]
+            if not (g.describe_only or table in g.table_grants or self._table_has_tag(table, g.tag_grants)):
+                raise AccessDenied(f"{role} has no Lake Formation DESCRIBE/SELECT grant on '{table}'")
             role_glue = sess.client("glue")
             resp = role_glue.get_table(DatabaseName=self.database, Name=table)
             return pd.DataFrame([
