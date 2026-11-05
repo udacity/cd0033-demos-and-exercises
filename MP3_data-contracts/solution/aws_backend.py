@@ -85,8 +85,8 @@ def _detect_workgroup_and_results(athena, s3, account_id: str, database: str, re
 class AwsGovernedCatalog(GovernedCatalog):  # pragma: no cover - live AWS
     """Live AWS implementation of the governance engine (Glue + Lake Formation + Athena)."""
 
-    def __init__(self, db_path: str = "trailhead.db"):
-        super().__init__(db_path)
+    def __init__(self):
+        super().__init__()
 
         import boto3
         self.region = _cfg("CARDINAL_AWS_REGION", "us-east-1")
@@ -347,7 +347,7 @@ class AwsGovernedCatalog(GovernedCatalog):  # pragma: no cover - live AWS
         self.glue.update_table(DatabaseName=self.database, TableInput=ti)
 
     # ----------------------------------------------------------------------- #
-    # MP7 — Lake Formation grants (real), mirrored locally
+    # MP7 — Lake Formation grants (live AWS)
     # ----------------------------------------------------------------------- #
 
     def _principal(self, role: str) -> dict:

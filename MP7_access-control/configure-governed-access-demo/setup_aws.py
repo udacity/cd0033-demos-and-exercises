@@ -100,7 +100,7 @@ def main() -> None:
     s3 = session.client("s3")
     account_id = session.client("sts").get_caller_identity()["Account"]
 
-    conn, catalog = seed_data.build(":memory:")
+    tables_dfs, catalog = seed_data.build()
     database = _cfg("CARDINAL_GLUE_DATABASE", catalog.database)
     s3_data = _detect_s3_data_bucket(s3, account_id, database, region)
     bucket_name = s3_data.split("://", 1)[1].split("/")[0]
@@ -128,7 +128,7 @@ def main() -> None:
 
     # 3. Tables: write parquet + register in Glue, then stamp deliberate-gap metadata
     for name, tm in catalog.tables.items():
-        df = pd.read_sql_query(f"SELECT * FROM {name}", conn)
+        df = tables_dfs[name]
         path = f"{s3_data}/{name}/"
         wr.s3.to_parquet(df=df, path=path, dataset=True, mode="overwrite",
                          database=database, table=name, boto3_session=session)

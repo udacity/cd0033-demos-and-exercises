@@ -5,7 +5,7 @@ signal across the platform — missing catalog metadata, data-quality failures, 
 cross-domain consent conflict, and **access-control gaps** on PII tables. As the governance lead,
 run the audit, **remediate what is fixable in AWS, and re-run until the platform is compliant.**
 
-> This exercise runs against **live AWS Glue, Lake Formation, and Amazon Athena** (no local fallback).
+> This exercise runs against **live AWS Glue, Lake Formation, and Amazon Athena**.
 
 ## Your task
 

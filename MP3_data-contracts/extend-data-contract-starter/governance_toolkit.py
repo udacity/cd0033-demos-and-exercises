@@ -14,18 +14,17 @@ Maps directly onto the AWS governance stack:
     OpenLineage        -> Lineage events + trace_downstream / trace_upstream / simulate_breach
     Reporting pipeline -> run_sustainability_report()
 
-LIVE AWS ENFORCEMENT
---------------------
+LIVE AWS ARCHITECTURE
+---------------------
 `make_catalog()` connects to live AWS (Glue Data Catalog + Lake Formation + Amazon Athena)
-via `AwsGovernedCatalog` with no silent local fallback. If the AWS Cloud Lab is not
-connected or seeded yet, `make_catalog()` stops with a clear error message instructing
-the learner to run the "Step 0: Connect to your Cloud Lab" cell (`setup_aws.py`).
+via `AwsGovernedCatalog`. If the AWS Cloud Lab is not connected or seeded yet,
+`make_catalog()` stops with a clear error message instructing the learner to run the
+"Step 0: Connect to your Cloud Lab" cell (`setup_aws.py`).
 """
 from __future__ import annotations
 
 import os
 import re
-import sqlite3
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Callable
@@ -82,9 +81,7 @@ def contract_slos() -> pd.DataFrame:
 
 
 def lf_backend() -> str:
-    """Return 'live' if a real AWS Glue / Lake Formation / Athena path is connected, else 'local'."""
-    if os.environ.get("CARDINAL_LF_LIVE") == "0":
-        return "local"
+    """Return 'live' if a real AWS Glue / Lake Formation / Athena path is connected, else 'disconnected'."""
     try:
         import awswrangler  # noqa: F401
         import boto3
@@ -95,23 +92,20 @@ def lf_backend() -> str:
         sess.client("glue").get_database(Name=db)
         return "live"
     except Exception:
-        return "local"
+        return "disconnected"
 
 
-def make_catalog(db_path: str = "trailhead.db"):
+def make_catalog():
     """Return the live AWS governance engine (`AwsGovernedCatalog`).
 
     Fails loudly if the AWS Cloud Lab is not connected or the Glue database has not been
     seeded yet, instructing the learner to run the Step 0 setup cell (`setup_aws.py`).
     """
-    if os.environ.get("CARDINAL_LF_LIVE") == "0":
-        return GovernedCatalog(db_path)
-
     os.environ.setdefault("CARDINAL_LF_LIVE", "1")
     os.environ.setdefault("CARDINAL_AWS_REGION", "us-east-1")
     try:
         from aws_backend import AwsGovernedCatalog
-        return AwsGovernedCatalog(db_path)
+        return AwsGovernedCatalog()
     except Exception as e:
         raise RuntimeError(
             "AWS Cloud Lab is not connected or not seeded yet. "
@@ -145,9 +139,8 @@ class RoleGrants:
 class GovernedCatalog:
     """Base catalog + Lake Formation model (subclassed by AwsGovernedCatalog for live AWS)."""
 
-    def __init__(self, db_path: str = ":memory:"):
-        self.conn, self.catalog = seed_data.build(":memory:")
-        self.conn.row_factory = sqlite3.Row
+    def __init__(self):
+        self.tables_dfs, self.catalog = seed_data.build()
         self._grants: dict[str, RoleGrants] = {r: RoleGrants() for r in PERSONAS}
         self._row_filters: dict[str, dict] = {}   # name -> {table, expr}
         self.lineage = build_lineage()
@@ -155,8 +148,10 @@ class GovernedCatalog:
     # ---- read helpers ------------------------------------------------------- #
 
     def query(self, sql: str) -> pd.DataFrame:
-        """Unrestricted query (admin context). Overridden on AwsGovernedCatalog to query Athena."""
-        return pd.read_sql_query(sql, self.conn)
+        """Unrestricted query (admin context). Implemented on AwsGovernedCatalog via Amazon Athena."""
+        raise RuntimeError(
+            "Direct SQL queries require a live AWS Cloud Lab connection via make_catalog()."
+        )
 
     def tables(self) -> list[str]:
         return list(self.catalog.tables)
@@ -316,61 +311,15 @@ class GovernedCatalog:
     # ---- query-as-persona --------------------------------------------------- #
 
     def query_as(self, role: str, sql: str) -> pd.DataFrame:
-        """Run `sql` as `role`, enforcing that role's Lake Formation grants.
-
-        On `AwsGovernedCatalog` (live AWS), executes strictly against live AWS (STS assume-role
-        + Glue/Athena) and NEVER falls back to local SQLite on failure.
+        """Run `sql` as `role`, enforcing that role's Lake Formation grants on live AWS
+        (STS assume-role + Glue/Athena).
         """
         self._check_role(role)
-        if type(self).__name__ != "GovernedCatalog" or os.environ.get("CARDINAL_LF_LIVE") == "1":
-            if hasattr(self, "_query_as_live") and type(self).__name__ != "GovernedCatalog":
-                return self._query_as_live(role, sql)
-        return self._query_as_local(role, sql)
-
-    def _query_as_local(self, role: str, sql: str) -> pd.DataFrame:
-        g = self._grants[role]
-        table = _table_in_from(sql)
-        if _is_describe(sql):
-            if table is None:
-                raise AccessDenied("metadata query did not name a table")
-            tg = g.table_grants.get(table)
-            via_tag = self._table_has_tag(table, g.tag_grants)
-            if not (g.describe_only or tg is not None or via_tag):
-                raise AccessDenied(f"{role} has no Lake Formation grant (DESCRIBE or SELECT) on '{table}'")
-            return self.describe(table)
-
-        if table is None:
-            raise AccessDenied("could not determine target table; single-table SELECT/DESCRIBE required")
-
-        tg = g.table_grants.get(table)
-        via_tag = self._table_has_tag(table, g.tag_grants)
-        if tg is None and not via_tag:
-            if g.describe_only:
-                raise AccessDenied(f"{role} has metadata-only access; SELECT on '{table}' denied")
-            raise AccessDenied(f"{role} has no Lake Formation SELECT grant on '{table}'")
-
-        # Union semantics: a tag grant (or full table grant) wins over a narrower table grant or describe_only
-        if via_tag:
-            allowed_cols, row_filter = self._cols(table), None
-        else:
-            allowed_cols = tg.columns if tg.columns is not None else self._cols(table)
-            row_filter = tg.row_filter
-
-        view = f"gv__{role}__{table}"
-        col_sql = ", ".join(allowed_cols)
-        where = f" WHERE {row_filter}" if row_filter else ""
-        self.conn.execute(f"DROP VIEW IF EXISTS {view}")
-        self.conn.execute(f"CREATE TEMP VIEW {view} AS SELECT {col_sql} FROM {table}{where}")
-        rewritten = re.sub(rf"\bFROM\s+{re.escape(table)}\b", f"FROM {view}", sql,
-                           flags=re.IGNORECASE)
-        try:
-            return pd.read_sql_query(rewritten, self.conn)
-        except Exception as e:
-            msg = str(e).lower()
-            if "no such column" in msg or "no column" in msg:
-                raise AccessDenied(f"{role} requested a column not permitted on '{table}' "
-                                   f"(column-level deny)") from None
-            raise
+        if hasattr(self, "_query_as_live"):
+            return self._query_as_live(role, sql)
+        raise RuntimeError(
+            "Persona queries require a live AWS Cloud Lab connection via make_catalog()."
+        )
 
     # ---- internals ---------------------------------------------------------- #
 
@@ -455,10 +404,10 @@ def _is_describe(sql: str) -> bool:
     return s.startswith("describe") or s.startswith("pragma") or s.startswith("show columns")
 
 
-def _make_df_runner(conn_or_query) -> Callable[[str], pd.DataFrame]:
-    if callable(conn_or_query):
-        return conn_or_query
-    return lambda q: pd.read_sql_query(q, conn_or_query)
+def _make_df_runner(query_fn: Callable[[str], pd.DataFrame]) -> Callable[[str], pd.DataFrame]:
+    if callable(query_fn):
+        return query_fn
+    raise TypeError("Expected a query callable such as gc.query")
 
 
 # ============================================================================= #
@@ -476,12 +425,9 @@ def _expectation(table, column, etype, dimension, total, unexpected, **extra):
             "unexpected_percent": pct, **extra}
 
 
-def run_quality_suite(conn_or_query) -> pd.DataFrame:
-    """Run expectation-style checks across the six data-quality dimensions.
-
-    Accepts either a callable `gc.query` (Athena / live AWS) or a DB connection.
-    """
-    df = _make_df_runner(conn_or_query)
+def run_quality_suite(query_fn: Callable[[str], pd.DataFrame]) -> pd.DataFrame:
+    """Run expectation-style checks across the six data-quality dimensions via `gc.query` (Athena)."""
+    df = _make_df_runner(query_fn)
     results = []
 
     # completeness
@@ -828,15 +774,14 @@ def governance_audit(gc: GovernedCatalog, contracts_valid: bool | None = None) -
 # ============================================================================= #
 
 def verify_step7(gc: GovernedCatalog, table: str = "customer") -> pd.DataFrame:
-    """Query the governed table as each persona and assert the intended end-state.
+    """Query the governed table as each persona on live AWS and assert the intended end-state.
 
-    On live AWS, errors surface directly as FAIL ('live query failed: ...') rather than
-    falling back to a local copy. Includes a `backend` column showing which engine answered.
+    Includes a `backend` column showing the active AWS engine.
     """
     if hasattr(gc, "_sync_from_aws"):
         gc._sync_from_aws()
 
-    active_backend = "live (AWS Lake Formation + Athena)" if type(gc).__name__ == "AwsGovernedCatalog" else "local"
+    active_backend = "live (AWS Lake Formation + Athena)"
     all_cols = set(gc._cols(table))
     pii_cols = {"full_name", "email", "phone"} & all_cols
     expected_analyst_cols = all_cols - pii_cols
@@ -1024,7 +969,7 @@ def base_contract() -> dict:
 
 
 if __name__ == "__main__":
-    gc = GovernedCatalog(":memory:")
+    gc = make_catalog()
     print("AUDIT gaps:", len(gc.catalog_audit()))
     q = gc.run_quality_suite()
     print("QUALITY failing:", int((~q["success"]).sum()), "of", len(q))

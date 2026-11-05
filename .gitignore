@@ -13,6 +13,7 @@ Exercise Creation Resources/
 *SOLUTION-BEATS.md
 *DEMO-BEATS.md
 
-# Local SQLite databases
+# Jupyter checkpoints & artifacts
+.ipynb_checkpoints/
 *.db
 

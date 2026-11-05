@@ -3,7 +3,7 @@
 ## Summary
 
 This exercise practices **operating** governance against **live AWS Glue, Lake Formation, and Amazon
-Athena** (no local fallback): running a platform-wide audit (`AwsGovernedCatalog` reads live Glue
+Athena**: running a platform-wide audit (`AwsGovernedCatalog` reads live Glue
 table/column classifications and live Lake Formation tags/permissions), driving the AWS-fixable
 control-plane findings to zero (catalog in Glue, access in Lake Formation), and managing the
 remaining signals (`quality_violation`, `consent_conflict`, `missing_lineage`) with both

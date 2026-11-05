@@ -5,7 +5,7 @@ slices of the `customer` table, and "just trust people" is not a control. Using 
 Formation**, configure fine-grained access for four personas, then **prove enforcement by
 querying as each persona in Amazon Athena**.
 
-> This exercise runs against **live AWS Glue, Lake Formation, and Amazon Athena** (no local fallback).
+> This exercise runs against **live AWS Glue, Lake Formation, and Amazon Athena**.
 
 ## Your task
 

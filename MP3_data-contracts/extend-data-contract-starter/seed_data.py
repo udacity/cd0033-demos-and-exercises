@@ -8,27 +8,27 @@ Trailhead does not hand over the Cardinal capstone answers.
 
 Authored in the build workspace as `trailhead_seed.py`; the build script copies it into each
 exercise/demo folder AS `seed_data.py`, so `governance_toolkit.py` (which does
-`import seed_data`) runs against Trailhead unchanged.
+`import seed_data`) and `setup_aws.py` run against Trailhead unchanged.
 
-Everything is local: tables land in SQLite (the "data lake"); the metadata catalog is an
-in-memory Glue-style structure with governance-tag gaps and cross-domain conflicts.
+Tables are seeded to S3 (Parquet) and registered in the AWS Glue Data Catalog with
+deliberate governance-tag gaps and cross-domain conflicts by `setup_aws.py`.
 Deterministic (fixed RNG seed) so every learner and reviewer sees identical data.
 """
 from __future__ import annotations
 
-import os
 import random
-import sqlite3
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Optional
+
+import pandas as pd
 
 SEED = 71
 EPOCH = datetime(2025, 1, 1, 0, 0, 0)
 COMPANY = "Trailhead Provisions"
 
 # ----------------------------------------------------------------------------- #
-# Metadata catalog (Glue Data Catalog analog)
+# Metadata catalog (Glue Data Catalog structure)
 # ----------------------------------------------------------------------------- #
 
 @dataclass
@@ -97,33 +97,13 @@ def _phone(rng: random.Random, region: str, dirty: bool = False) -> str:
 # Build
 # ----------------------------------------------------------------------------- #
 
-def _connect(db_path: str) -> sqlite3.Connection:
-    if db_path != ":memory:" and os.path.exists(db_path):
-        os.remove(db_path)
-    conn = sqlite3.connect(db_path)
-    conn.execute("PRAGMA foreign_keys = OFF")
-    return conn
-
-
-def build(db_path: str = "trailhead.db") -> tuple[sqlite3.Connection, Catalog]:
-    """Build the Trailhead Provisions lake + catalog. Returns (sqlite_conn, Catalog)."""
+def build() -> tuple[dict[str, pd.DataFrame], Catalog]:
+    """Build the Trailhead Provisions dataset tables + catalog metadata.
+    Returns (tables_dfs, Catalog).
+    """
     rng = random.Random(SEED)
-    conn = _connect(db_path)
-    cur = conn.cursor()
 
     # --- Customer Identity & Loyalty ------------------------------------------ #
-    cur.execute("""
-        CREATE TABLE customer (
-            customer_id      INTEGER PRIMARY KEY,
-            full_name        TEXT,
-            email            TEXT,
-            phone            TEXT,
-            region           TEXT,
-            country          TEXT,
-            loyalty_tier     TEXT,
-            marketing_consent INTEGER,
-            created_ts       TEXT
-        )""")
     n_customers = 300
     combos = [(f, l) for f in _FIRST for l in _LAST]
     rng.shuffle(combos)
@@ -173,16 +153,7 @@ def build(db_path: str = "trailhead.db") -> tuple[sqlite3.Connection, Catalog]:
         src = customers[src_cid - 1]
         customers.append((n_customers + 8 + offset, src[1], nm_email, nm_phone,
                           nm_reg, nm_ctry, nm_tier, nm_cons, nm_ts))
-    cur.executemany("INSERT INTO customer VALUES (?,?,?,?,?,?,?,?,?)", customers)
-
     # --- E-commerce Orders ---------------------------------------------------- #
-    cur.execute("""
-        CREATE TABLE orders (
-            order_id INTEGER PRIMARY KEY, customer_id INTEGER, order_ts TEXT,
-            status TEXT, amount REAL, currency TEXT)""")
-    cur.execute("""
-        CREATE TABLE order_returns (
-            return_id INTEGER PRIMARY KEY, order_id INTEGER, reason TEXT, qty INTEGER)""")
     n_orders = 1200
     orders, returns, rid = [], [], 1
     for oid in range(1, n_orders + 1):
@@ -197,27 +168,17 @@ def build(db_path: str = "trailhead.db") -> tuple[sqlite3.Connection, Catalog]:
         if status == "returned":
             returns.append((rid, oid, rng.choice(_RETURN_REASONS), rng.randint(1, 3)))
             rid += 1
-    cur.executemany("INSERT INTO orders VALUES (?,?,?,?,?,?)", orders)
-    cur.executemany("INSERT INTO order_returns VALUES (?,?,?,?)", returns)
 
     # --- Inventory & Fulfillment ---------------------------------------------- #
-    cur.execute("""
-        CREATE TABLE supplier (
-            supplier_id INTEGER PRIMARY KEY, name TEXT, country TEXT, esg_rating TEXT)""")
-    cur.execute("""
-        CREATE TABLE product (
-            product_id INTEGER PRIMARY KEY, name TEXT, category TEXT, supplier_id INTEGER,
-            unit_cost REAL, sustainability_class TEXT)""")
-    cur.execute("""
-        CREATE TABLE shipment (
-            shipment_id INTEGER PRIMARY KEY, order_id INTEGER, carrier TEXT,
-            ship_ts TEXT, carbon_kg REAL)""")
     n_suppliers = 40
+    suppliers = []
     for sid in range(1, n_suppliers + 1):
-        cur.execute("INSERT INTO supplier VALUES (?,?,?,?)",
-                    (sid, f"Supplier-{sid:02d}", rng.choice(sum(_REGION_COUNTRY.values(), [])),
-                     rng.choice(["A", "B", "C", None])))
+        suppliers.append(
+            (sid, f"Supplier-{sid:02d}", rng.choice(sum(_REGION_COUNTRY.values(), [])),
+             rng.choice(["A", "B", "C", None]))
+        )
     n_products = 200
+    products = []
     for pid in range(1, n_products + 1):
         cat = rng.choice(_CATEGORIES)
         if rng.random() < 0.08:
@@ -225,9 +186,11 @@ def build(db_path: str = "trailhead.db") -> tuple[sqlite3.Connection, Catalog]:
         sustainability = rng.choice(["recycled", "organic", "standard"])
         if rng.random() < 0.45:
             sustainability = None
-        cur.execute("INSERT INTO product VALUES (?,?,?,?,?,?)",
-                    (pid, f"{rng.choice(_CATEGORIES).title()} Model {pid}", cat,
-                     rng.randint(1, n_suppliers), round(rng.uniform(5, 240), 2), sustainability))
+        products.append(
+            (pid, f"{rng.choice(_CATEGORIES).title()} Model {pid}", cat,
+             rng.randint(1, n_suppliers), round(rng.uniform(5, 240), 2), sustainability)
+        )
+    shipments = []
     sid = 1
     for (oid, cid, ots, status, amount, cur_code) in orders:
         if status == "cancelled":
@@ -236,26 +199,20 @@ def build(db_path: str = "trailhead.db") -> tuple[sqlite3.Connection, Catalog]:
         if rng.random() < 0.03:
             carbon = carbon * 1000  # grams-not-kg unit error (CSRD traceability defect)
         ship_ts = (datetime.fromisoformat(ots) + timedelta(days=rng.randint(1, 5))).isoformat()
-        cur.execute("INSERT INTO shipment VALUES (?,?,?,?,?)",
-                    (sid, oid, rng.choice(_CARRIERS), ship_ts, carbon))
+        shipments.append((sid, oid, rng.choice(_CARRIERS), ship_ts, carbon))
         sid += 1
 
     # --- Marketing & Campaigns ------------------------------------------------ #
-    cur.execute("""
-        CREATE TABLE campaign (
-            campaign_id INTEGER PRIMARY KEY, name TEXT, channel TEXT,
-            start_date TEXT, end_date TEXT)""")
-    cur.execute("""
-        CREATE TABLE campaign_membership (
-            membership_id INTEGER PRIMARY KEY, campaign_id INTEGER, cust_ref TEXT,
-            segment TEXT, mkt_consent INTEGER)""")
     n_campaigns = 20
+    campaigns = []
     for cpid in range(1, n_campaigns + 1):
         start = EPOCH - timedelta(days=rng.randint(30, 400))
         end = start + timedelta(days=rng.randint(7, 60))
-        cur.execute("INSERT INTO campaign VALUES (?,?,?,?,?)",
-                    (cpid, f"Campaign {cpid}", rng.choice(_CHANNELS),
-                     start.date().isoformat(), end.date().isoformat()))
+        campaigns.append(
+            (cpid, f"Campaign {cpid}", rng.choice(_CHANNELS),
+             start.date().isoformat(), end.date().isoformat())
+        )
+    memberships = []
     mid = 1
     for _ in range(800):
         cpid = rng.randint(1, n_campaigns)
@@ -263,12 +220,47 @@ def build(db_path: str = "trailhead.db") -> tuple[sqlite3.Connection, Catalog]:
         cust_ref = cust[2]                       # marketing keys customers by EMAIL
         loyalty_consent = cust[7]
         mkt_consent = loyalty_consent if rng.random() > 0.20 else (1 - loyalty_consent)
-        cur.execute("INSERT INTO campaign_membership VALUES (?,?,?,?,?)",
-                    (mid, cpid, cust_ref, rng.choice(_SEGMENTS), mkt_consent))
+        memberships.append((mid, cpid, cust_ref, rng.choice(_SEGMENTS), mkt_consent))
         mid += 1
 
-    conn.commit()
-    return conn, _build_catalog()
+    tables_dfs = {
+        "customer": pd.DataFrame(
+            customers,
+            columns=[
+                "customer_id", "full_name", "email", "phone", "region",
+                "country", "loyalty_tier", "marketing_consent", "created_ts",
+            ],
+        ),
+        "orders": pd.DataFrame(
+            orders,
+            columns=["order_id", "customer_id", "order_ts", "status", "amount", "currency"],
+        ),
+        "order_returns": pd.DataFrame(
+            returns,
+            columns=["return_id", "order_id", "reason", "qty"],
+        ),
+        "supplier": pd.DataFrame(
+            suppliers,
+            columns=["supplier_id", "name", "country", "esg_rating"],
+        ),
+        "product": pd.DataFrame(
+            products,
+            columns=["product_id", "name", "category", "supplier_id", "unit_cost", "sustainability_class"],
+        ),
+        "shipment": pd.DataFrame(
+            shipments,
+            columns=["shipment_id", "order_id", "carrier", "ship_ts", "carbon_kg"],
+        ),
+        "campaign": pd.DataFrame(
+            campaigns,
+            columns=["campaign_id", "name", "channel", "start_date", "end_date"],
+        ),
+        "campaign_membership": pd.DataFrame(
+            memberships,
+            columns=["membership_id", "campaign_id", "cust_ref", "segment", "mkt_consent"],
+        ),
+    }
+    return tables_dfs, _build_catalog()
 
 
 def _build_catalog() -> Catalog:
@@ -384,11 +376,10 @@ def _build_catalog() -> Catalog:
 
 
 if __name__ == "__main__":
-    conn, cat = build(":memory:")
-    cur = conn.cursor()
+    tables_dfs, cat = build()
     print(f"{COMPANY} — tables, rows, gaps:")
     for t in cat.tables:
-        n = cur.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0]
+        n = len(tables_dfs[t])
         gaps = [g for g in ("owner", "classification", "retention")
                 if getattr(cat.table(t), g) is None]
         untagged = [c.name for c in cat.table(t).columns if c.classification is None]
