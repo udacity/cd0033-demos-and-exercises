@@ -163,6 +163,16 @@ def build(db_path: str = "trailhead.db") -> tuple[sqlite3.Connection, Catalog]:
                 name = name.replace(" ", "  ")
         customers.append((new_id, name, email, src[3], src[4], src[5],
                           rng.choice(_TIERS), src[7], src[8]))
+    # 2 deliberate NON-match persons (homonyms: same name + trailing-digit email local-part,
+    # but a completely different person with different phone, region, country, and created_ts)
+    nonmatch_specs = [
+        (1, "zane.saleh2@outlook.com", "+14158902341", "NA", "US", "silver", 0, "2022-03-14T10:00:00"),
+        (3, "pia.lindqvist7@proton.me", "+55119876543", "LATAM", "BR", "gold", 0, "2021-05-11T08:00:00"),
+    ]
+    for offset, (src_cid, nm_email, nm_phone, nm_reg, nm_ctry, nm_tier, nm_cons, nm_ts) in enumerate(nonmatch_specs, start=1):
+        src = customers[src_cid - 1]
+        customers.append((n_customers + 8 + offset, src[1], nm_email, nm_phone,
+                          nm_reg, nm_ctry, nm_tier, nm_cons, nm_ts))
     cur.executemany("INSERT INTO customer VALUES (?,?,?,?,?,?,?,?,?)", customers)
 
     # --- E-commerce Orders ---------------------------------------------------- #

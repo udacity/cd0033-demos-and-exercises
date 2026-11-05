@@ -7,3 +7,12 @@ MP*.zip
 # Python bytecode cache
 __pycache__/
 *.py[cod]
+
+# Authoring / exercise creation documents & voiceover scripts
+Exercise Creation Resources/
+*SOLUTION-BEATS.md
+*DEMO-BEATS.md
+
+# Local SQLite databases
+*.db
+

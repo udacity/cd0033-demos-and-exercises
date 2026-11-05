@@ -1,24 +1,17 @@
 """
-setup_aws.py — PROVISIONER-SIDE seeder for the live Cardinal Outfitters platform.
+setup_aws.py — Cloud Lab seeder for the live Trailhead / Cardinal governed platform.
 
-Run ONCE per Vocareum/AWS account by the platform team (NOT by learners) to stand up the
-real resources the live backend (aws_backend.py) expects:
+Creates / refreshes the real AWS resources the live backend (aws_backend.py) uses:
 
     1. an S3 data location with one prefix per table (parquet),
-    2. an AWS Glue database + tables whose metadata reproduces the SAME deliberate
-       governance gaps as the local seed (so MP2 has real gaps to find and fix),
-    3. registration of the S3 location with Lake Formation.
+    2. an AWS Glue database + tables whose metadata reproduces the deliberate
+       governance gaps in seed_data._build_catalog() (so MP2/MP9 have real gaps to fix),
+    3. registration of the S3 location with Lake Formation,
+    4. disabling Lake Formation IAMAllowedPrincipals default grants on the database
+       and tables so Lake Formation mediates all table access.
 
-It does NOT create the four persona IAM roles or assign the Lake Formation Data Lake
-Administrator — those are provisioned by Vocareum per environment-provisioning-request.md.
-
-The gap structure is canonical in seed_data._build_catalog(); this script mirrors it into
-Glue so local and live backends audit identically.
-
-    python3 setup_aws.py            # uses env config below
-    CARDINAL_GLUE_DATABASE=cardinal CARDINAL_S3_DATA=s3://<bucket>/cardinal python3 setup_aws.py
-
-NOTE: build-to-spec; not executed outside a provisioned account (# pragma: no cover).
+Can be invoked from the CLI (`python3 setup_aws.py`) or directly from a notebook's
+Step 0 cell (`import setup_aws; setup_aws.main()`).
 """
 from __future__ import annotations  # pragma: no cover
 
@@ -33,6 +26,69 @@ def _cfg(key: str, default: str) -> str:
     return os.environ.get(key, default)
 
 
+def _detect_s3_data_bucket(s3, account_id: str, database: str, region: str) -> str:
+    """Resolve the S3 data location: honour CARDINAL_S3_DATA, else reuse an existing lab
+    bucket (<account>-<database>-data or <account>-cardinal-data), else create one."""
+    explicit = os.environ.get("CARDINAL_S3_DATA")
+    if explicit:
+        return explicit.rstrip("/")
+
+    candidates = [
+        f"{account_id}-{database}-data",
+        f"{account_id}-cardinal-data",
+        f"{account_id}-trailhead-data",
+    ]
+    for b in dict.fromkeys(candidates):
+        try:
+            s3.head_bucket(Bucket=b)
+            # If sharing the cardinal-data bucket for trailhead, namespace by database
+            prefix = f"/{database}" if (b.endswith("-cardinal-data") and database != "cardinal") else ""
+            return f"s3://{b}{prefix}"
+        except Exception:
+            continue
+
+    target_bucket = f"{account_id}-{database}-data"
+    create_kw = {"Bucket": target_bucket}
+    if region != "us-east-1":
+        create_kw["CreateBucketConfiguration"] = {"LocationConstraint": region}
+    s3.create_bucket(**create_kw)
+    print(f"created S3 bucket {target_bucket!r} in {region}")
+    return f"s3://{target_bucket}"
+
+
+def _revoke_iam_allowed_principals(lf, account_id: str, database: str, tables: list[str]) -> None:
+    """Ensure IAMAllowedPrincipals has no default or standing grants on the database/tables."""
+    iam_allowed = {"DataLakePrincipalIdentifier": "IAM_ALLOWED_PRINCIPALS"}
+    try:
+        settings = lf.get_data_lake_settings()["DataLakeSettings"]
+        settings["CreateDatabaseDefaultPermissions"] = []
+        settings["CreateTableDefaultPermissions"] = []
+        lf.put_data_lake_settings(DataLakeSettings=settings)
+    except Exception:
+        pass
+
+    try:
+        lf.revoke_permissions(
+            Principal=iam_allowed,
+            Resource={"Database": {"CatalogId": account_id, "Name": database}},
+            Permissions=["ALL"],
+        )
+    except Exception:
+        pass
+
+    for t in tables:
+        for perms in (["ALL"], ["SELECT", "DESCRIBE", "ALTER", "DROP", "INSERT", "DELETE"]):
+            try:
+                lf.revoke_permissions(
+                    Principal=iam_allowed,
+                    Resource={"Table": {"CatalogId": account_id,
+                                        "DatabaseName": database, "Name": t}},
+                    Permissions=perms,
+                )
+            except Exception:
+                pass
+
+
 def main() -> None:
     import awswrangler as wr
     import boto3
@@ -41,36 +97,36 @@ def main() -> None:
     session = boto3.Session(region_name=region)
     glue = session.client("glue")
     lf = session.client("lakeformation")
+    s3 = session.client("s3")
     account_id = session.client("sts").get_caller_identity()["Account"]
 
     conn, catalog = seed_data.build(":memory:")
-    # Derive the database name from whichever seed is present (cardinal capstone or
-    # trailhead exercises), so this one script seeds either environment unchanged.
     database = _cfg("CARDINAL_GLUE_DATABASE", catalog.database)
-    s3_data = _cfg("CARDINAL_S3_DATA", f"s3://{account_id}-{database}-data").rstrip("/")
-
-    # 1a. S3 bucket (create if it doesn't exist)
-    s3 = session.client("s3")
+    s3_data = _detect_s3_data_bucket(s3, account_id, database, region)
     bucket_name = s3_data.split("://", 1)[1].split("/")[0]
-    try:
-        s3.head_bucket(Bucket=bucket_name)
-        print(f"S3 bucket {bucket_name!r} already exists")
-    except s3.exceptions.ClientError:
-        create_kw = {"Bucket": bucket_name}
-        if region != "us-east-1":
-            create_kw["CreateBucketConfiguration"] = {"LocationConstraint": region}
-        s3.create_bucket(**create_kw)
-        print(f"created S3 bucket {bucket_name!r} in {region}")
 
-    # 1b. database
+    # 0. Disable Lake Formation default IAMAllowedPrincipals grants before creating tables
+    _revoke_iam_allowed_principals(lf, account_id, database, [])
+
+    # 1. Glue database
     try:
-        glue.create_database(DatabaseInput={"Name": database,
-                                            "Description": "Cardinal Outfitters governed platform"})
+        glue.create_database(DatabaseInput={
+            "Name": database,
+            "Description": f"{seed_data.COMPANY if hasattr(seed_data, 'COMPANY') else 'Governed'} retail data platform",
+        })
         print(f"created Glue database {database!r}")
     except glue.exceptions.AlreadyExistsException:
         print(f"Glue database {database!r} already exists")
 
-    # 2. tables: write parquet + register, then stamp the deliberate-gap metadata
+    # 2. Register the S3 bucket with Lake Formation so LF mediates reads
+    try:
+        lf.register_resource(ResourceArn=f"arn:aws:s3:::{bucket_name}",
+                             UseServiceLinkedRole=True)
+        print(f"registered s3://{bucket_name} with Lake Formation")
+    except Exception:
+        pass
+
+    # 3. Tables: write parquet + register in Glue, then stamp deliberate-gap metadata
     for name, tm in catalog.tables.items():
         df = pd.read_sql_query(f"SELECT * FROM {name}", conn)
         path = f"{s3_data}/{name}/"
@@ -81,16 +137,9 @@ def main() -> None:
         untagged = [c.name for c in tm.columns if c.classification is None]
         print(f"  {name:22} rows={len(df):5d}  table-gaps={gaps}  untagged-cols={untagged}")
 
-    # 3. register the S3 location with Lake Formation (so LF, not raw S3/IAM, mediates reads)
-    try:
-        lf.register_resource(ResourceArn=f"arn:aws:s3:::{s3_data.split('://',1)[1]}",
-                             UseServiceLinkedRole=True)
-        print(f"registered {s3_data} with Lake Formation")
-    except lf.exceptions.AlreadyExistsException:
-        print(f"{s3_data} already registered with Lake Formation")
-
-    print("\nDone. Confirm: IAMAllowedPrincipals default grants are OFF on this database "
-          "(provisioning-request §7), persona roles exist, and the notebook role is LF admin.")
+    # 4. Revoke any IAMAllowedPrincipals permissions on the database and newly created tables
+    _revoke_iam_allowed_principals(lf, account_id, database, list(catalog.tables))
+    print(f"\nDone. Glue database {database!r} seeded in {s3_data} with Lake Formation enforcement enabled.")
 
 
 def _apply_catalog_metadata(glue, database: str, name: str, tm) -> None:
@@ -100,15 +149,19 @@ def _apply_catalog_metadata(glue, database: str, name: str, tm) -> None:
           ("Name", "Description", "StorageDescriptor", "PartitionKeys", "TableType", "Parameters")
           if k in resp["Table"]}
     params = ti.setdefault("Parameters", {})
+    for k in ("owner", "classification", "retention"):
+        params.pop(k, None)
     params["domain"] = tm.domain
     for attr in ("owner", "classification", "retention"):
         val = getattr(tm, attr)
         if val is not None:                       # leave gaps unset on purpose
             params[attr] = val
     for col in ti.get("StorageDescriptor", {}).get("Columns", []):
+        col_params = col.setdefault("Parameters", {})
+        col_params.pop("classification", None)
         meta = tm.column(col["Name"])
         if meta is not None and meta.classification is not None:
-            col.setdefault("Parameters", {})["classification"] = meta.classification
+            col_params["classification"] = meta.classification
     glue.update_table(DatabaseName=database, TableInput=ti)
 
 
