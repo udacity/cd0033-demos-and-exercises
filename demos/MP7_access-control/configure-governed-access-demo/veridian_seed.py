@@ -59,7 +59,6 @@ class MedallionTable:
 class LakehouseCatalog:
     database: str
     tables: dict[str, MedallionTable]
-    semantic_conflicts: list[dict] = field(default_factory=list)
 
     def table(self, name: str) -> MedallionTable:
         return self.tables[name]
@@ -354,27 +353,7 @@ def _build_catalog() -> LakehouseCatalog:
             steward=None, sensitivity="CONFIDENTIAL", retention_policy=None,           # GAP x2
             description="Conformed Silver payer claims billing table."),
     }
-    conflicts = [
-        {"concept": "patient identity key",
-         "domain_a": "Patient Identity & Intake",
-         "field_a": "silver_patient_master.mpi_id (INTEGER Master Patient Index)",
-         "domain_b": "Revenue Cycle & Quality Reporting",
-         "field_b": "silver_claim_billing.patient_email_ref (email string)",
-         "impact": "No shared surrogate key; cross-domain clinical/billing joins rely on mutable email strings."},
-        {"concept": "secondary-use research authorization",
-         "domain_a": "Patient Identity & Intake",
-         "field_a": "silver_patient_master.hipaa_research_auth",
-         "domain_b": "Clinical Telehealth",
-         "field_b": "silver_clinical_encounter.session_research_opt_in",
-         "impact": "Session opt-in disagrees with HIPAA authorization SoR ~18% of the time; secondary-use HIPAA/GDPR Art. 9 risk."},
-        {"concept": "diagnostic turnaround unit of measure",
-         "domain_a": "Diagnostics & Labs",
-         "field_a": "silver_lab_result.turnaround_min (minutes)",
-         "domain_b": "CMS eCQM Reporting (Gold)",
-         "field_b": "3% of analyzer feeds recorded in seconds (60x scale)",
-         "impact": "Mixed seconds/minutes inflate CMS Timely Diagnostic Care quarterly wait-time disclosures."},
-    ]
-    return LakehouseCatalog(database=DATABASE, tables=tables, semantic_conflicts=conflicts)
+    return LakehouseCatalog(database=DATABASE, tables=tables)
 
 
 if __name__ == "__main__":

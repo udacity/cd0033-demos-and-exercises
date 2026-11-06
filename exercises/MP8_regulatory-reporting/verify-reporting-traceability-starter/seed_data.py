@@ -58,7 +58,6 @@ class TableMeta:
 class Catalog:
     database: str
     tables: dict[str, TableMeta]
-    semantic_conflicts: list[dict] = field(default_factory=list)
 
     def table(self, name: str) -> TableMeta:
         return self.tables[name]
@@ -358,21 +357,7 @@ def _build_catalog() -> Catalog:
             owner=None, classification="SENSITIVE", retention=None,        # GAP x2
             description="Campaign membership; keys customers by email."),
     }
-    conflicts = [
-        {"concept": "customer identity key",
-         "domain_a": "Customer Identity & Loyalty", "field_a": "customer.customer_id (INTEGER surrogate)",
-         "domain_b": "Marketing & Campaigns", "field_b": "campaign_membership.cust_ref (email string)",
-         "impact": "No shared join key; cross-domain customer resolution must match on email."},
-        {"concept": "marketing consent",
-         "domain_a": "Customer Identity & Loyalty", "field_a": "customer.marketing_consent",
-         "domain_b": "Marketing & Campaigns", "field_b": "campaign_membership.mkt_consent",
-         "impact": "Two systems of record for consent disagree ~20% of the time; GDPR risk if marketing acts on stale consent."},
-        {"concept": "carbon unit of measure",
-         "domain_a": "Inventory & Fulfillment", "field_a": "shipment.carbon_kg (kg)",
-         "domain_b": "Reporting (derived)", "field_b": "a slice stored in grams",
-         "impact": "Mixed units inflate the CSRD disclosure unless normalized; traceability breaks at the unit boundary."},
-    ]
-    return Catalog(database="trailhead", tables=tables, semantic_conflicts=conflicts)
+    return Catalog(database="trailhead", tables=tables)
 
 
 if __name__ == "__main__":
@@ -384,4 +369,3 @@ if __name__ == "__main__":
                 if getattr(cat.table(t), g) is None]
         untagged = [c.name for c in cat.table(t).columns if c.classification is None]
         print(f"  {t:22} rows={n:5d}  tbl_gaps={gaps}  untagged_cols={untagged}")
-    print(f"\nSemantic conflicts: {len(cat.semantic_conflicts)}")

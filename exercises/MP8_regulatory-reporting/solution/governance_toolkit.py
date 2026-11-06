@@ -186,7 +186,92 @@ class GovernedCatalog:
         return pd.DataFrame(rows)
 
     def semantic_conflicts(self) -> pd.DataFrame:
-        return pd.DataFrame(self.catalog.semantic_conflicts)
+        """Dynamically detect cross-domain semantic conflicts from the Glue catalog schema and live Athena queries."""
+        rows = []
+
+        # 1. Cross-domain customer identity key mismatch (Glue catalog schema + live Athena query on campaign_membership)
+        cust_tm = self.catalog.table("customer")
+        mem_tm = self.catalog.table("campaign_membership")
+        cid_col = cust_tm.column("customer_id")
+        ref_col = mem_tm.column("cust_ref")
+        if cid_col and ref_col and cid_col.type != ref_col.type:
+            mem_stats = self.query(
+                "SELECT COUNT(*) AS total, "
+                "SUM(CASE WHEN cust_ref LIKE '%@%' THEN 1 ELSE 0 END) AS email_keys "
+                "FROM campaign_membership"
+            ).iloc[0]
+            total_mem = int(mem_stats["total"])
+            email_keys = int(mem_stats["email_keys"])
+            na_keys = total_mem - email_keys
+            pct_email = round(100.0 * email_keys / max(total_mem, 1), 2)
+            rows.append({
+                "concept": "customer identity key",
+                "domain_a": cust_tm.domain,
+                "field_a": f"customer.{cid_col.name} ({cid_col.type} surrogate)",
+                "domain_b": mem_tm.domain,
+                "field_b": f"campaign_membership.{ref_col.name} ({ref_col.type} — {email_keys}/{total_mem} [{pct_email}%] email strings, {na_keys} 'n/a')",
+                "impact": (
+                    f"{email_keys} of {total_mem} ({pct_email}%) campaign memberships key customers by email string "
+                    f"(plus {na_keys} unresolvable 'n/a' rows) instead of customer_id; cross-domain resolution must match on email."
+                ),
+            })
+
+        # 2. Cross-domain marketing consent disagreement (live Athena join on valid email keys)
+        consent_stats = self.query(
+            "SELECT COUNT(*) AS total, "
+            "SUM(CASE WHEN mkt_consent != loyalty_consent THEN 1 ELSE 0 END) AS mism "
+            "FROM ("
+            "  SELECT m.membership_id, m.mkt_consent, MIN(c.marketing_consent) AS loyalty_consent "
+            "  FROM campaign_membership m "
+            "  JOIN customer c ON m.cust_ref = c.email "
+            "  WHERE m.cust_ref LIKE '%@%' AND c.email LIKE '%@%' "
+            "  GROUP BY m.membership_id, m.mkt_consent"
+            ") t"
+        ).iloc[0]
+        total_resolved = int(consent_stats["total"])
+        mism_consent = int(consent_stats["mism"])
+        if mism_consent > 0:
+            pct_mism = round(100.0 * mism_consent / max(total_resolved, 1), 2)
+            rows.append({
+                "concept": "marketing consent",
+                "domain_a": cust_tm.domain,
+                "field_a": "customer.marketing_consent",
+                "domain_b": mem_tm.domain,
+                "field_b": "campaign_membership.mkt_consent",
+                "impact": (
+                    f"{mism_consent} of {total_resolved} valid-email memberships ({pct_mism}%) disagree with the "
+                    f"loyalty consent system of record; GDPR risk if marketing acts on stale consent."
+                ),
+            })
+
+        # 3. Carbon unit-of-measure conflict (live Athena distribution check on shipment.carbon_kg)
+        ship_tm = self.catalog.table("shipment")
+        ship_stats = self.query(
+            "SELECT COUNT(*) AS total, "
+            "SUM(CASE WHEN carbon_kg > 100 THEN 1 ELSE 0 END) AS gram_rows, "
+            "ROUND(MAX(CASE WHEN carbon_kg <= 100 THEN carbon_kg END), 2) AS max_kg, "
+            "ROUND(MAX(carbon_kg), 1) AS max_raw "
+            "FROM shipment"
+        ).iloc[0]
+        total_ship = int(ship_stats["total"])
+        gram_rows = int(ship_stats["gram_rows"])
+        if gram_rows > 0:
+            pct_gram = round(100.0 * gram_rows / max(total_ship, 1), 2)
+            max_kg = float(ship_stats["max_kg"])
+            max_raw = float(ship_stats["max_raw"])
+            rows.append({
+                "concept": "carbon unit of measure",
+                "domain_a": ship_tm.domain,
+                "field_a": f"shipment.carbon_kg (kg, <= {max_kg} kg)",
+                "domain_b": "Reporting (derived)",
+                "field_b": f"{gram_rows}/{total_ship} ({pct_gram}%) shipments stored in grams (up to {max_raw})",
+                "impact": (
+                    f"{gram_rows} of {total_ship} shipments ({pct_gram}%) are recorded in grams (1000x scale) "
+                    f"instead of kilograms, inflating the CSRD disclosure unless normalized."
+                ),
+            })
+
+        return pd.DataFrame(rows)
 
     def set_table_metadata(self, table: str, owner: str | None = None,
                            classification: str | None = None,
@@ -752,10 +837,14 @@ def governance_audit(gc: GovernedCatalog, contracts_valid: bool | None = None) -
         findings.append({"signal": "contract_invalid", "object": "orders data contract",
                          "severity": "high", "source": "contract validator (MP3)"})
 
-    # 5. consent conflict (the cross-domain semantic conflict, surfaced as a standing risk)
-    findings.append({"signal": "consent_conflict",
-                     "object": "customer.marketing_consent vs campaign_membership.mkt_consent",
-                     "severity": "high", "source": "semantic_conflicts (MP2)"})
+    # 5. consent conflict (detected dynamically via gc.semantic_conflicts())
+    sem = gc.semantic_conflicts()
+    consent_rows = sem[sem["concept"] == "marketing consent"] if not sem.empty else pd.DataFrame()
+    if not consent_rows.empty:
+        r = consent_rows.iloc[0]
+        findings.append({"signal": "consent_conflict",
+                         "object": f"{r['field_a']} vs {r['field_b']}",
+                         "severity": "high", "source": "semantic_conflicts (MP2)"})
 
     # 6. access-control gaps: any PII-bearing table with no valid Lake Formation governance.
     for t in gc.tables():

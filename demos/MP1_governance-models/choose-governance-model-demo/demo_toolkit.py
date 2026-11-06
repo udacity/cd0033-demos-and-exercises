@@ -157,7 +157,88 @@ class MedallionLakehouse:
         return pd.DataFrame(rows)
 
     def semantic_conflicts(self) -> pd.DataFrame:
-        return pd.DataFrame(self.catalog.semantic_conflicts)
+        """Dynamically detect cross-domain semantic conflicts from the Glue catalog schema and live Athena queries."""
+        rows = []
+
+        # 1. Cross-domain patient identity key mismatch (Glue catalog schema + live Athena query on silver_claim_billing)
+        pat_tm = self.catalog.table("silver_patient_master")
+        clm_tm = self.catalog.table("silver_claim_billing")
+        mpi_col = pat_tm.column("mpi_id")
+        ref_col = clm_tm.column("patient_email_ref")
+        if mpi_col and ref_col and mpi_col.type != ref_col.type:
+            clm_stats = self.query(
+                "SELECT COUNT(*) AS total, "
+                "SUM(CASE WHEN patient_email_ref LIKE '%@%' THEN 1 ELSE 0 END) AS email_keys "
+                "FROM silver_claim_billing"
+            ).iloc[0]
+            total_clm = int(clm_stats["total"])
+            email_keys = int(clm_stats["email_keys"])
+            na_keys = total_clm - email_keys
+            pct_email = round(100.0 * email_keys / max(total_clm, 1), 2)
+            rows.append({
+                "concept": "patient identity key",
+                "domain_a": pat_tm.domain,
+                "field_a": f"silver_patient_master.{mpi_col.name} ({mpi_col.type} surrogate)",
+                "domain_b": clm_tm.domain,
+                "field_b": f"silver_claim_billing.{ref_col.name} ({ref_col.type} — {email_keys}/{total_clm} [{pct_email}%] email strings, {na_keys} 'n/a')",
+                "impact": (
+                    f"{email_keys} of {total_clm} ({pct_email}%) billing claims key patients by mutable email string "
+                    f"(plus {na_keys} unresolvable 'n/a' rows) instead of mpi_id; joining Silver Patient Master to Claims requires email resolution."
+                ),
+            })
+
+        # 2. Cross-domain secondary-use research authorization disagreement (live Athena join)
+        enc_tm = self.catalog.table("silver_clinical_encounter")
+        auth_stats = self.query(
+            "SELECT COUNT(*) AS total, "
+            "SUM(CASE WHEN e.session_research_opt_in != p.hipaa_research_auth THEN 1 ELSE 0 END) AS mism "
+            "FROM silver_clinical_encounter e "
+            "JOIN silver_patient_master p ON e.mpi_id = p.mpi_id"
+        ).iloc[0]
+        total_enc = int(auth_stats["total"])
+        mism_auth = int(auth_stats["mism"])
+        if mism_auth > 0:
+            pct_mism = round(100.0 * mism_auth / max(total_enc, 1), 2)
+            rows.append({
+                "concept": "secondary-use research authorization",
+                "domain_a": pat_tm.domain,
+                "field_a": "silver_patient_master.hipaa_research_auth",
+                "domain_b": enc_tm.domain,
+                "field_b": "silver_clinical_encounter.session_research_opt_in",
+                "impact": (
+                    f"{mism_auth} of {total_enc} encounters ({pct_mism}%) disagree with the HIPAA authorization "
+                    f"system of record; HIPAA Privacy Rule & GDPR Art. 9 violation if unconsented encounters enter research."
+                ),
+            })
+
+        # 3. Diagnostic turnaround unit-of-measure conflict (live Athena distribution check on silver_lab_result)
+        lab_tm = self.catalog.table("silver_lab_result")
+        lab_stats = self.query(
+            "SELECT COUNT(*) AS total, "
+            "SUM(CASE WHEN turnaround_min > 240 THEN 1 ELSE 0 END) AS sec_rows, "
+            "ROUND(MAX(CASE WHEN turnaround_min <= 240 THEN turnaround_min END), 1) AS max_min, "
+            "ROUND(MAX(turnaround_min), 1) AS max_raw "
+            "FROM silver_lab_result"
+        ).iloc[0]
+        total_labs = int(lab_stats["total"])
+        sec_rows = int(lab_stats["sec_rows"])
+        if sec_rows > 0:
+            pct_sec = round(100.0 * sec_rows / max(total_labs, 1), 2)
+            max_min = float(lab_stats["max_min"])
+            max_raw = float(lab_stats["max_raw"])
+            rows.append({
+                "concept": "diagnostic turnaround unit of measure",
+                "domain_a": lab_tm.domain,
+                "field_a": f"silver_lab_result.turnaround_min (minutes, <= {max_min} min)",
+                "domain_b": "CMS Quality Reporting (Gold)",
+                "field_b": f"{sec_rows}/{total_labs} ({pct_sec}%) vendor panels stored in seconds (up to {max_raw})",
+                "impact": (
+                    f"{sec_rows} of {total_labs} lab results ({pct_sec}%) are recorded in seconds (60x scale) "
+                    f"instead of minutes, inflating Gold CMS eCQM Timely Care disclosures unless normalized."
+                ),
+            })
+
+        return pd.DataFrame(rows)
 
     def set_table_governance(self, table: str, steward: str | None = None,
                              sensitivity: str | None = None,
@@ -697,13 +778,17 @@ def medallion_governance_audit(lh: MedallionLakehouse, contracts_valid: bool = T
             "source": "validate_medallion_contract (MP3)",
         })
 
-    findings.append({
-        "signal": "authorization_conflict",
-        "zone": "silver",
-        "object": "silver_patient_master.hipaa_research_auth vs silver_clinical_encounter.session_research_opt_in",
-        "severity": "high",
-        "source": "semantic_conflicts (MP2)",
-    })
+    sem = lh.semantic_conflicts()
+    auth_rows = sem[sem["concept"] == "secondary-use research authorization"] if not sem.empty else pd.DataFrame()
+    if not auth_rows.empty:
+        r = auth_rows.iloc[0]
+        findings.append({
+            "signal": "authorization_conflict",
+            "zone": "silver",
+            "object": f"{r['field_a']} vs {r['field_b']}",
+            "severity": "high",
+            "source": "semantic_conflicts (MP2)",
+        })
 
     for t in lh.tables():
         tm = lh.catalog.table(t)
