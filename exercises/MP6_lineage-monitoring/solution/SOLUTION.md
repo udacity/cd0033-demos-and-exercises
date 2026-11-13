@@ -13,13 +13,13 @@ pii_impact = gc.lineage.trace_downstream("customer")
 # -> ['customer_360', 'marketing_audience']
 
 report_sources = gc.lineage.trace_upstream("quarterly_sustainability")
-# -> ['order_carbon', 'orders', 'shipment']
+# -> ['order_carbon', 'product', 'supplier', 'orders', 'shipment']
 ```
 
 1. **Downstream of `customer` (`['customer_360', 'marketing_audience']`):** Confirms that a
    `customer` PII breach impacts Customer 360 and Marketing Audience, and **does not** reach
    `quarterly_sustainability`.
-2. **Upstream of `quarterly_sustainability` (`['order_carbon', 'orders', 'shipment']`):** Confirms
+2. **Upstream of `quarterly_sustainability` (`['order_carbon', 'product', 'supplier', 'orders', 'shipment']`):** Confirms
    the CSRD report's actual upstream sources (`order_carbon`, fed by `orders` and `shipment`), with
    no dependency on `customer`.
 

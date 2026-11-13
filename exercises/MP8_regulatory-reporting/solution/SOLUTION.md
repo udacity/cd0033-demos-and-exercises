@@ -22,7 +22,7 @@ suspect = detail[detail["carbon_kg"] > 100]    # the grams-not-kg slice
 
 - **Traced quarter (`2023Q4`):**
   - Disclosed: **`5,355.6 kg`** vs. Recomputed: **`665.2 kg`** → Gap (`delta_kg`): **`4,690.4 kg`** (**~8.1× inflation**).
-  - Caused by **1 shipment** out of 140 non-cancelled shipments in `2023Q4` (`shipment_id=22`, `order_id=23` in deterministic table order; or `shipment_id=855`, `order_id=923` in alternate join orderings) recorded in grams (**`4,695.0 g`** instead of **`4.695 kg`**, inflating the quarter by `4,695.0 - 4.695 = 4,690.305 ≈ 4,690.4 kg`).
+  - Caused by **1 shipment** out of 140 non-cancelled shipments in `2023Q4` (`shipment_id=22`, `order_id=23`) recorded in grams (**`4,695.0 g`** instead of **`4.695 kg`**, inflating the quarter by `4,695.0 - 4.695 = 4,690.305 ≈ 4,690.4 kg`).
 - **Five-quarter total (`2023Q4`–`2024Q4`):**
   - Disclosed: **`247,207.3 kg`** vs. Recomputed: **`5,483.0 kg`** → Total delta: **`241,724.3 kg`** (**~45.1× inflation**).
   - Driven by **43 gram-scaled shipments** (`carbon_kg > 100`) out of **1,109** total non-cancelled shipments (~3.9% of rows).

@@ -422,26 +422,30 @@ class GovernedCatalog:
 
     def _table_access_governed(self, table: str) -> bool:
         """True if `table` is governed in Lake Formation:
-        1. The table carries an LF-Tag (e.g. governed=true) that matches a persona's tag grant
+        1. The table carries an LF-Tag (e.g. governed=true) that matches co_data_steward's tag grant
            (or has an explicit scoped table grant), AND
-        2. No non-steward persona holds an unmasked table grant that exposes PII columns on `table`.
+        2. No non-steward persona holds a tag grant matching the table's tags, nor an unmasked
+           table grant that exposes PII columns on `table`.
         """
         tm = self.catalog.table(table)
         pii_cols = {c.name for c in tm.columns if c.classification == "PII" or c.name in PII_COLUMN_NAMES}
 
-        # Check that no non-steward persona has a direct table grant exposing PII columns without a row filter
+        # Check that no non-steward persona has a tag grant matching the table's tags or an
+        # unmasked direct table grant exposing PII columns without a row filter
         for role, g in self._grants.items():
             if role == "co_data_steward":
                 continue
+            if any((k, v) in g.tag_grants for k, v in tm.lf_tags.items()):
+                return False
             tg = g.table_grants.get(table)
             if tg is not None and tg.row_filter is None:
                 granted_cols = set(tg.columns if tg.columns is not None else self._cols(table))
                 if granted_cols & pii_cols:
                     return False
 
-        # Must have a tag on the table that is actively granted via grant_by_tag to a steward/persona
-        all_tag_grants = set().union(*(g.tag_grants for g in self._grants.values()))
-        if any((k, v) in all_tag_grants for k, v in tm.lf_tags.items()):
+        # Must have a tag on the table that is actively granted via grant_by_tag to co_data_steward
+        steward_grants = self._grants.get("co_data_steward")
+        if steward_grants and any((k, v) in steward_grants.tag_grants for k, v in tm.lf_tags.items()):
             return True
 
         # Or have explicit least-privilege table grants configured (with PII masked or row-filtered)
@@ -751,7 +755,7 @@ def build_lineage() -> Lineage:
         "build_order_carbon": {"inputs": ["orders", "shipment"],
                                "outputs": ["order_carbon"]},
         "build_quarterly_sustainability": {
-            "inputs": ["order_carbon"],
+            "inputs": ["order_carbon", "product", "supplier"],
             "outputs": ["quarterly_sustainability"]},
         "build_customer_360": {"inputs": ["customer", "campaign_membership"],
                                "outputs": ["customer_360"]},

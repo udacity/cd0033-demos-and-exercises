@@ -554,6 +554,7 @@ class AwsGovernedCatalog(GovernedCatalog):  # pragma: no cover - live AWS
                 "permission(s)",
                 "column not found",
                 "cannot be resolved",
+                "no accessible columns",
             )):
                 raise AccessDenied(f"{role}: {e}") from None
             raise

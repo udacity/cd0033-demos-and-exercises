@@ -17,11 +17,10 @@ platform monitoring table.
   Data Catalog and S3 tables if not already present.
 - Answer the **two separate lineage questions**:
   1. **Customer PII breach blast radius (downstream):** Trace everything **downstream of `customer`**
-     (`gc.lineage.trace_downstream("customer")`) to confirm that a `customer` PII breach impacts
-     `customer_360` and `marketing_audience`, and **does not** reach `quarterly_sustainability`.
+     (`gc.lineage.trace_downstream("customer")`). Which datasets does a `customer` PII breach impact, and does the breach reach the CSRD report (`quarterly_sustainability`)? Show it from the trace.
   2. **CSRD report provenance (upstream):** Trace the **upstream sources** of
-     `quarterly_sustainability` (`gc.lineage.trace_upstream("quarterly_sustainability")`) to confirm
-     the CSRD report's actual upstream sources (`order_carbon`, `orders`, `shipment`).
+     `quarterly_sustainability` (`gc.lineage.trace_upstream("quarterly_sustainability")`) to identify
+     the CSRD report's actual upstream sources.
 - Specify a **monitoring table**: each signal with source/where, threshold, owner, and the
   SLA/regulation it maps to (including a PII breach / anomalous access signal mapped to GDPR Art. 33);
   and flag at least one gap the current signals would miss.

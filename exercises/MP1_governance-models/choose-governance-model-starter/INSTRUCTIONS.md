@@ -7,8 +7,8 @@
 - **Marketing & Campaigns** (led by the **Marketing & Campaigns Lead**)
 
 Alongside the four domain leads, the organization has three cross-cutting roles:
-- A **Central Governance Lead** (owns enterprise data policy, classification taxonomy, and access-control baselines)
-- A shared **Platform Engineering** team (manages pipeline infrastructure and OpenLineage instrumentation)
+- A newly appointed **Central Governance Lead** (decide what they own)
+- A shared **Platform Engineering Lead** (leading the Platform Engineering team, which manages pipeline infrastructure and OpenLineage instrumentation)
 - A Finance-appointed **CSRD Reporting Owner** (owns sustainability disclosure definitions and audit readiness)
 
 Each domain team owns its pipelines and definitions, but a **GDPR audit** and a **CSRD sustainability mandate** create obligations that cross every domain. Decide how to govern.
@@ -23,7 +23,7 @@ In `exercise.ipynb`, run **Step 0: Connect to your Cloud Lab** first to seed and
   Trailhead's domain autonomy AND its GDPR/CSRD exposure, naming which decisions stay central and
   which side each role sits on (central/platform vs. domain).
 - A **RACI** across the four domains and cross-cutting roles with **exactly one single Accountable (`A`) individual** per governance function, plus the enforcement authority and an escalation path.
-- A **Mermaid topology** showing the central governance core, the four domains, and the key cross-domain flows (consent routed through the central consent standard, and order → carbon → CSRD report).
+- A **Mermaid topology** showing the central governance core, the four domains, and the key cross-domain flows (consent, and order → carbon → CSRD report).
 
 ## Provided files
 

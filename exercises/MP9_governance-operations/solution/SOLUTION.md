@@ -57,7 +57,7 @@ After clearing `missing_metadata` (`10 -> 0`) and `access_control_gap` (`1 -> 2 
 remain across three recurring operational signals. For each category, separate **current instance
 remediation** from **recurring operational SLO monitoring**:
 
-- **`quality_violation` (8 findings — 6 high, 2 low)**:
+- **`quality_violation` (8 findings — 5 high, 3 low)**:
   - *Concrete SLO targets*: completeness `>= 99.0%` non-null (`product.category`, `product.sustainability_class`),
     validity `>= 99.5%` valid format (`customer.email`, `customer.phone`), accuracy `>= 99.9%` non-negative
     (`orders.amount`) and `100%` in kg (`0 < carbon_kg <= 100` on `shipment.carbon_kg`), timeliness `>= 98.0%`

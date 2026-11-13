@@ -84,8 +84,9 @@ resource "aws_lakeformation_lf_tag" "governed" {
 }
 
 resource "aws_lakeformation_resource_lf_tag" "tag_table" {
-  database {
-    name = aws_glue_catalog_database.db.name
+  table {
+    database_name = aws_glue_catalog_database.db.name
+    name          = aws_glue_catalog_table.table.name
   }
   lf_tag {
     key   = aws_lakeformation_lf_tag.governed.key
