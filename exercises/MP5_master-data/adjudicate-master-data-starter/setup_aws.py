@@ -89,7 +89,30 @@ def _revoke_iam_allowed_principals(lf, account_id: str, database: str, tables: l
                 pass
 
 
+def _load_dotenv() -> None:
+    """Load key=value pairs from the nearest .env file without overriding existing env vars."""
+    from pathlib import Path
+    seen = set()
+    for base in (Path.cwd(), Path(__file__).resolve().parent):
+        for parent in (base, *base.parents):
+            candidate = parent / ".env"
+            if candidate in seen or not candidate.is_file():
+                continue
+            seen.add(candidate)
+            for raw in candidate.read_text(encoding="utf-8").splitlines():
+                line = raw.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                k, v = line.split("=", 1)
+                k = k.strip()
+                v = v.strip().strip("\"").strip("'")
+                if k and v and not os.environ.get(k):
+                    os.environ[k] = v
+            return
+
+
 def main() -> None:
+    _load_dotenv()
     import awswrangler as wr
     import boto3
 

@@ -17,3 +17,8 @@ Exercise Creation Resources/
 .ipynb_checkpoints/
 *.db
 
+# Local environment / AWS credentials
+.env
+.env.*
+!.env.example
+
